@@ -1,12 +1,14 @@
+import os
 import os.path as osp
 from functools import reduce
 
 import mmcv
 import numpy as np
 from mmcv.utils import print_log
+from terminaltables import AsciiTable
 from torch.utils.data import Dataset
 
-from mmseg.core import mean_iou
+from mmseg.core import eval_metrics
 from mmseg.utils import get_root_logger
 from .builder import DATASETS
 from .pipelines import Compose
@@ -14,9 +16,8 @@ from .pipelines import Compose
 
 @DATASETS.register_module()
 class CustomDataset(Dataset):
-    """Custom dataset for semantic segmentation.
-
-    An example of file structure is as followed.
+    """Custom dataset for semantic segmentation. An example of file structure
+    is as followed.
 
     .. code-block:: none
 
@@ -226,25 +227,17 @@ class CustomDataset(Dataset):
         """Place holder to format result to dataset specific output."""
         pass
 
-    def get_gt_seg_maps(self):
+    def get_gt_seg_maps(self, efficient_test=False):
         """Get ground truth segmentation maps for evaluation."""
         gt_seg_maps = []
         for img_info in self.img_infos:
             seg_map = osp.join(self.ann_dir, img_info['ann']['seg_map'])
-            gt_seg_map = mmcv.imread(
-                seg_map, flag='unchanged', backend='pillow')
-            # modify if custom classes
-            if self.label_map is not None:
-                for old_id, new_id in self.label_map.items():
-                    gt_seg_map[gt_seg_map == old_id] = new_id
-            if self.reduce_zero_label:
-                # avoid using underflow conversion
-                gt_seg_map[gt_seg_map == 0] = 255
-                gt_seg_map = gt_seg_map - 1
-                gt_seg_map[gt_seg_map == 254] = 255
-
+            if efficient_test:
+                gt_seg_map = seg_map
+            else:
+                gt_seg_map = mmcv.imread(
+                    seg_map, flag='unchanged', backend='pillow')
             gt_seg_maps.append(gt_seg_map)
-
         return gt_seg_maps
 
     def get_classes_and_palette(self, classes=None, palette=None):
@@ -310,12 +303,18 @@ class CustomDataset(Dataset):
 
         return palette
 
-    def evaluate(self, results, metric='mIoU', logger=None, **kwargs):
+    def evaluate(self,
+                 results,
+                 metric='mIoU',
+                 logger=None,
+                 efficient_test=False,
+                 **kwargs):
         """Evaluate the dataset.
 
         Args:
             results (list): Testing results of the dataset.
-            metric (str | list[str]): Metrics to be evaluated.
+            metric (str | list[str]): Metrics to be evaluated. 'mIoU' and
+                'mDice' are supported.
             logger (logging.Logger | None | str): Logger used for printing
                 related information during evaluation. Default: None.
 
@@ -323,49 +322,59 @@ class CustomDataset(Dataset):
             dict[str, float]: Default metrics.
         """
 
-        if not isinstance(metric, str):
-            assert len(metric) == 1
-            metric = metric[0]
-        allowed_metrics = ['mIoU']
-        if metric not in allowed_metrics:
+        if isinstance(metric, str):
+            metric = [metric]
+        allowed_metrics = ['mIoU', 'mDice']
+        if not set(metric).issubset(set(allowed_metrics)):
             raise KeyError('metric {} is not supported'.format(metric))
-
         eval_results = {}
-        gt_seg_maps = self.get_gt_seg_maps()
+        gt_seg_maps = self.get_gt_seg_maps(efficient_test)
         if self.CLASSES is None:
             num_classes = len(
                 reduce(np.union1d, [np.unique(_) for _ in gt_seg_maps]))
         else:
             num_classes = len(self.CLASSES)
-
-        all_acc, acc, iou = mean_iou(
-            results, gt_seg_maps, num_classes, ignore_index=self.ignore_index)
-        summary_str = ''
-        summary_str += 'per class results:\n'
-
-        line_format = '{:<15} {:>10} {:>10}\n'
-        summary_str += line_format.format('Class', 'IoU', 'Acc')
+        ret_metrics = eval_metrics(
+            results,
+            gt_seg_maps,
+            num_classes,
+            self.ignore_index,
+            metric,
+            label_map=self.label_map,
+            reduce_zero_label=self.reduce_zero_label)
+        class_table_data = [['Class'] + [m[1:] for m in metric] + ['Acc']]
         if self.CLASSES is None:
             class_names = tuple(range(num_classes))
         else:
             class_names = self.CLASSES
+        ret_metrics_round = [
+            np.round(ret_metric * 100, 2) for ret_metric in ret_metrics
+        ]
         for i in range(num_classes):
-            iou_str = '{:.2f}'.format(iou[i] * 100)
-            acc_str = '{:.2f}'.format(acc[i] * 100)
-            summary_str += line_format.format(class_names[i], iou_str, acc_str)
-        summary_str += 'Summary:\n'
-        line_format = '{:<15} {:>10} {:>10} {:>10}\n'
-        summary_str += line_format.format('Scope', 'mIoU', 'mAcc', 'aAcc')
+            class_table_data.append([class_names[i]] +
+                                    [m[i] for m in ret_metrics_round[2:]] +
+                                    [ret_metrics_round[1][i]])
+        summary_table_data = [['Scope'] +
+                              ['m' + head
+                               for head in class_table_data[0][1:]] + ['aAcc']]
+        ret_metrics_mean = [
+            np.round(np.nanmean(ret_metric) * 100, 2)
+            for ret_metric in ret_metrics
+        ]
+        summary_table_data.append(['global'] + ret_metrics_mean[2:] +
+                                  [ret_metrics_mean[1]] +
+                                  [ret_metrics_mean[0]])
+        print_log('per class results:', logger)
+        table = AsciiTable(class_table_data)
+        print_log('\n' + table.table, logger=logger)
+        print_log('Summary:', logger)
+        table = AsciiTable(summary_table_data)
+        print_log('\n' + table.table, logger=logger)
 
-        iou_str = '{:.2f}'.format(np.nanmean(iou) * 100)
-        acc_str = '{:.2f}'.format(np.nanmean(acc) * 100)
-        all_acc_str = '{:.2f}'.format(all_acc * 100)
-        summary_str += line_format.format('global', iou_str, acc_str,
-                                          all_acc_str)
-        print_log(summary_str, logger)
-
-        eval_results['mIoU'] = np.nanmean(iou)
-        eval_results['mAcc'] = np.nanmean(acc)
-        eval_results['aAcc'] = all_acc
-
+        for i in range(1, len(summary_table_data[0])):
+            eval_results[summary_table_data[0]
+                         [i]] = summary_table_data[1][i] / 100.0
+        if mmcv.is_list_of(results, str):
+            for file_name in results:
+                os.remove(file_name)
         return eval_results

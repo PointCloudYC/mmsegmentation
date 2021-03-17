@@ -71,7 +71,17 @@ def test_ce_loss():
     loss_cls_cfg = dict(
         type='CrossEntropyLoss', use_sigmoid=True, loss_weight=1.0)
     loss_cls = build_loss(loss_cls_cfg)
-    assert torch.allclose(loss_cls(fake_pred, fake_label), torch.tensor(0.))
+    assert torch.allclose(loss_cls(fake_pred, fake_label), torch.tensor(100.))
+
+    fake_pred = torch.full(size=(2, 21, 8, 8), fill_value=0.5)
+    fake_label = torch.ones(2, 8, 8).long()
+    assert torch.allclose(
+        loss_cls(fake_pred, fake_label), torch.tensor(0.9503), atol=1e-4)
+    fake_label[:, 0, 0] = 255
+    assert torch.allclose(
+        loss_cls(fake_pred, fake_label, ignore_index=255),
+        torch.tensor(0.9354),
+        atol=1e-4)
 
     # TODO test use_mask
 
@@ -132,3 +142,103 @@ def test_accuracy():
     with pytest.raises(AssertionError):
         accuracy = Accuracy()
         accuracy(pred[:, :, None], true_label)
+
+
+def test_lovasz_loss():
+    from mmseg.models import build_loss
+
+    # loss_type should be 'binary' or 'multi_class'
+    with pytest.raises(AssertionError):
+        loss_cfg = dict(
+            type='LovaszLoss',
+            loss_type='Binary',
+            reduction='none',
+            loss_weight=1.0)
+        build_loss(loss_cfg)
+
+    # reduction should be 'none' when per_image is False.
+    with pytest.raises(AssertionError):
+        loss_cfg = dict(type='LovaszLoss', loss_type='multi_class')
+        build_loss(loss_cfg)
+
+    # test lovasz loss with loss_type = 'multi_class' and per_image = False
+    loss_cfg = dict(type='LovaszLoss', reduction='none', loss_weight=1.0)
+    lovasz_loss = build_loss(loss_cfg)
+    logits = torch.rand(1, 3, 4, 4)
+    labels = (torch.rand(1, 4, 4) * 2).long()
+    lovasz_loss(logits, labels)
+
+    # test lovasz loss with loss_type = 'multi_class' and per_image = True
+    loss_cfg = dict(
+        type='LovaszLoss',
+        per_image=True,
+        reduction='mean',
+        class_weight=[1.0, 2.0, 3.0],
+        loss_weight=1.0)
+    lovasz_loss = build_loss(loss_cfg)
+    logits = torch.rand(1, 3, 4, 4)
+    labels = (torch.rand(1, 4, 4) * 2).long()
+    lovasz_loss(logits, labels, ignore_index=None)
+
+    # test lovasz loss with loss_type = 'binary' and per_image = False
+    loss_cfg = dict(
+        type='LovaszLoss',
+        loss_type='binary',
+        reduction='none',
+        loss_weight=1.0)
+    lovasz_loss = build_loss(loss_cfg)
+    logits = torch.rand(2, 4, 4)
+    labels = (torch.rand(2, 4, 4)).long()
+    lovasz_loss(logits, labels)
+
+    # test lovasz loss with loss_type = 'binary' and per_image = True
+    loss_cfg = dict(
+        type='LovaszLoss',
+        loss_type='binary',
+        per_image=True,
+        reduction='mean',
+        loss_weight=1.0)
+    lovasz_loss = build_loss(loss_cfg)
+    logits = torch.rand(2, 4, 4)
+    labels = (torch.rand(2, 4, 4)).long()
+    lovasz_loss(logits, labels, ignore_index=None)
+
+
+def test_dice_lose():
+    from mmseg.models import build_loss
+
+    # loss_type should be 'binary' or 'multi_class'
+    with pytest.raises(AssertionError):
+        loss_cfg = dict(
+            type='DiceLoss',
+            loss_type='Binary',
+            reduction='none',
+            loss_weight=1.0)
+        build_loss(loss_cfg)
+
+    # test dice loss with loss_type = 'multi_class'
+    loss_cfg = dict(
+        type='DiceLoss',
+        loss_type='multi_class',
+        reduction='none',
+        class_weight=[1.0, 2.0, 3.0],
+        loss_weight=1.0,
+        ignore_index=1)
+    dice_loss = build_loss(loss_cfg)
+    logits = torch.rand(8, 3, 4, 4)
+    labels = (torch.rand(8, 4, 4) * 3).long()
+    dice_loss(logits, labels)
+
+    # test dice loss with loss_type = 'binary'
+    loss_cfg = dict(
+        type='DiceLoss',
+        loss_type='binary',
+        smooth=2,
+        exponent=3,
+        reduction='sum',
+        loss_weight=1.0,
+        ignore_index=0)
+    dice_loss = build_loss(loss_cfg)
+    logits = torch.rand(16, 4, 4)
+    labels = (torch.rand(16, 4, 4)).long()
+    dice_loss(logits, labels)

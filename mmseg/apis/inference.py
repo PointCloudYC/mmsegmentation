@@ -27,7 +27,8 @@ def init_segmentor(config, checkpoint=None, device='cuda:0'):
         raise TypeError('config must be a filename or Config object, '
                         'but got {}'.format(type(config)))
     config.model.pretrained = None
-    model = build_segmentor(config.model, test_cfg=config.test_cfg)
+    config.model.train_cfg = None
+    model = build_segmentor(config.model, test_cfg=config.get('test_cfg'))
     if checkpoint is not None:
         checkpoint = load_checkpoint(model, checkpoint, map_location='cpu')
         model.CLASSES = checkpoint['meta']['CLASSES']
@@ -89,7 +90,7 @@ def inference_segmentor(model, img):
         # scatter to specified GPU
         data = scatter(data, [device])[0]
     else:
-        data['img_metas'] = data['img_metas'][0].data
+        data['img_metas'] = [i.data[0] for i in data['img_metas']]
 
     # forward the model
     with torch.no_grad():
